@@ -2,12 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 const API_BASE_URL = "https://pokerai-gou9.onrender.com";
-const SUIT_SYMBOL = {
-  S: "\u2660",
-  H: "\u2665",
-  D: "\u2666",
-  C: "\u2663",
-};
+
+const SUIT_SYMBOL = { S: "\u2660", H: "\u2665", D: "\u2666", C: "\u2663" };
 
 const TABLE_POSITIONS = [
   { top: "11%", left: "50%" },
@@ -17,14 +13,25 @@ const TABLE_POSITIONS = [
   { top: "80%", left: "26%" },
   { top: "52%", left: "14%" },
 ];
+
 const TOTAL_ROUNDS = 3;
-const TURN_REVEAL_MS = 1050;
+const TURN_REVEAL_MS = 900;
 const ROUND_BANNER_MS = 1000;
 const BETWEEN_ROUND_MS = 700;
+const STAGE_BANNER_MS = 800;
+
+const STAGE_COLORS = {
+  "Pre-Flop": "text-cyan-200",
+  "Flop": "text-emerald-300",
+  "Turn": "text-amber-300",
+  "River": "text-rose-300",
+};
 
 function normalizeResult(raw) {
   const playersRaw = Array.isArray(raw?.players) ? raw.players : [];
   const gameLogRaw = Array.isArray(raw?.gameLog) ? raw.gameLog : [];
+  const stageSummaryRaw = Array.isArray(raw?.stageSummary) ? raw.stageSummary : [];
+
   const winnerName =
     typeof raw?.winner === "string"
       ? raw.winner
@@ -35,29 +42,28 @@ function normalizeResult(raw) {
   const players = playersRaw.map((player, idx) => ({
     name: player?.name || `Player ${idx + 1}`,
     cards: Array.isArray(player?.cards) ? player.cards : [],
-    action: player?.action || player?.decision || "call",
+    action: player?.action || "call",
     contribution: Number.isFinite(player?.contribution) ? player.contribution : 0,
     folded: Boolean(player?.folded),
   }));
 
   const gameLog = gameLogRaw.map((item, idx) => ({
     agentName: item?.agentName || `Player ${idx + 1}`,
-    actionText:
-      item?.actionText ||
-      (item?.decision
-        ? `${String(item.decision).charAt(0).toUpperCase()}${String(item.decision).slice(1)}`
-        : "Acted"),
+    actionText: item?.actionText || "Acted",
+    stage: item?.stage || "Pre-Flop",
     potAfterAction: Number.isFinite(item?.potAfterAction) ? item.potAfterAction : 0,
   }));
 
   return {
     winner: winnerName,
-    finalPot: Number.isFinite(raw?.finalPot) ? raw.finalPot : raw?.pot || 0,
+    finalPot: Number.isFinite(raw?.finalPot) ? raw.finalPot : 0,
     currentBet: Number.isFinite(raw?.currentBet) ? raw.currentBet : 10,
     communityCards: Array.isArray(raw?.communityCards) ? raw.communityCards : [],
+    stageCards: raw?.stageCards || { preFlop: [], flop: [], turn: [], river: [] },
     winningReason: raw?.winningReason || "",
     players,
     gameLog,
+    stageSummary: stageSummaryRaw,
   };
 }
 
@@ -115,8 +121,7 @@ function PlayingCard({ value, delay = 0, mini = false, hidden = false }) {
       className={`${mini ? "h-10 w-7 text-[10px]" : "h-[98px] w-[70px] text-[2rem]"} poker-real-card flex items-center justify-center rounded-md border border-slate-300/30 bg-[#f7f5ef] font-extrabold`}
     >
       <span className={isRed ? "text-red-600" : "text-neutral-900"}>
-        {rank}
-        {symbol}
+        {rank}{symbol}
       </span>
     </motion.div>
   );
@@ -125,23 +130,20 @@ function PlayingCard({ value, delay = 0, mini = false, hidden = false }) {
 function ChipStack({ className = "" }) {
   return (
     <div className={`chip-stack ${className}`}>
-      <span />
-      <span />
-      <span />
+      <span /><span /><span />
     </div>
   );
 }
 
 function wait(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function Poker({ agents }) {
   const [result, setResult] = useState(null);
   const [displayedLog, setDisplayedLog] = useState([]);
-  const [revealedCommunityCount, setRevealedCommunityCount] = useState(0);
+  const [currentStage, setCurrentStage] = useState("");
+  const [visibleCommunityCards, setVisibleCommunityCards] = useState([]);
   const [phase, setPhase] = useState("idle");
   const [error, setError] = useState("");
   const [parallax, setParallax] = useState({ x: 0, y: 0 });
@@ -154,23 +156,19 @@ function Poker({ agents }) {
   const runIdRef = useRef(0);
 
   const canStart = useMemo(
-    () =>
-      agents.length > 0 &&
-      phase !== "dealing" &&
-      phase !== "revealing" &&
-      phase !== "round-break",
+    () => agents.length > 0 && phase !== "dealing" && phase !== "revealing" && phase !== "round-break",
     [agents.length, phase]
   );
 
   useEffect(() => {
     return () => {
-      timersRef.current.forEach((timer) => clearTimeout(timer));
+      timersRef.current.forEach((t) => clearTimeout(t));
       timersRef.current = [];
     };
   }, []);
 
   const clearTimers = () => {
-    timersRef.current.forEach((timer) => clearTimeout(timer));
+    timersRef.current.forEach((t) => clearTimeout(t));
     timersRef.current = [];
   };
 
@@ -188,34 +186,48 @@ function Poker({ agents }) {
     if (runId !== runIdRef.current) return;
     setResult(normalized);
     setDisplayedLog([]);
-    setRevealedCommunityCount(0);
+    setVisibleCommunityCards([]);
+    setCurrentStage("Pre-Flop");
     setPhase("revealing");
 
-    for (let index = 0; index < normalized.gameLog.length; index += 1) {
-      if (runId !== runIdRef.current) return;
-      await wait(TURN_REVEAL_MS);
-      if (runId !== runIdRef.current) return;
-      const entry = normalized.gameLog[index];
-      setDisplayedLog((current) => [...current, entry]);
-      if (index === 0) setRevealedCommunityCount((count) => Math.max(count, 3));
-      if (index === 1) setRevealedCommunityCount((count) => Math.max(count, 4));
-      if (index === normalized.gameLog.length - 1) setRevealedCommunityCount(5);
-    }
+    const { stageSummary, stageCards } = normalized;
 
-    if (normalized.gameLog.length === 0) {
-      setRevealedCommunityCount(5);
+    for (const stageData of stageSummary) {
+      if (runId !== runIdRef.current) return;
+
+      // Show stage banner
+      setCurrentStage(stageData.stage);
+      setRoundBanner(stageData.stage);
+      setShowRoundBanner(true);
+      await wait(STAGE_BANNER_MS);
+      if (runId !== runIdRef.current) return;
+      setShowRoundBanner(false);
+
+      // Reveal community cards for this stage
+      if (stageData.communityCards && stageData.communityCards.length > 0) {
+        setVisibleCommunityCards(stageData.communityCards);
+        await wait(600);
+      }
+
+      // Reveal each action in this stage
+      for (const entry of stageData.logs) {
+        if (runId !== runIdRef.current) return;
+        await wait(TURN_REVEAL_MS);
+        setDisplayedLog((current) => [...current, entry]);
+      }
+
       await wait(400);
     }
+
+    // Show all 5 community cards at end
+    setVisibleCommunityCards(normalized.communityCards);
   };
 
   const computeOverallWinner = (winsMap) => {
     const entries = Object.entries(winsMap);
     if (entries.length === 0) return "";
     const topWins = Math.max(...entries.map(([, wins]) => wins));
-    const winners = entries
-      .filter(([, wins]) => wins === topWins)
-      .map(([name]) => name)
-      .sort((a, b) => a.localeCompare(b));
+    const winners = entries.filter(([, wins]) => wins === topWins).map(([name]) => name).sort();
     return winners.join(" & ");
   };
 
@@ -226,7 +238,8 @@ function Poker({ agents }) {
     setError("");
     setResult(null);
     setDisplayedLog([]);
-    setRevealedCommunityCount(0);
+    setVisibleCommunityCards([]);
+    setCurrentStage("");
     setRoundNumber(0);
     setRoundSummaries([]);
     setOverallWinner("");
@@ -247,11 +260,7 @@ function Poker({ agents }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            agents: agents.map(({ id, name, personality }) => ({
-              id,
-              name,
-              personality,
-            })),
+            agents: agents.map(({ id, name, personality }) => ({ id, name, personality })),
           }),
         });
 
@@ -269,20 +278,10 @@ function Poker({ agents }) {
         await revealRound(normalized, runId);
         if (runId !== runIdRef.current) return;
 
-        const winners = String(normalized.winner || "")
-          .split("&")
-          .map((name) => name.trim())
-          .filter(Boolean);
-        winners.forEach((name) => {
-          winsMap[name] = (winsMap[name] || 0) + 1;
-        });
+        const winners = String(normalized.winner || "").split("&").map((n) => n.trim()).filter(Boolean);
+        winners.forEach((name) => { winsMap[name] = (winsMap[name] || 0) + 1; });
 
-        summaries.push({
-          round,
-          winner: normalized.winner,
-          finalPot: normalized.finalPot,
-          winningReason: normalized.winningReason,
-        });
+        summaries.push({ round, winner: normalized.winner, finalPot: normalized.finalPot, winningReason: normalized.winningReason });
         setRoundSummaries([...summaries]);
 
         if (round < TOTAL_ROUNDS) {
@@ -295,10 +294,7 @@ function Poker({ agents }) {
       const finalWinner = computeOverallWinner(winsMap);
       setOverallWinner(finalWinner);
       setRoundNumber(TOTAL_ROUNDS);
-      await showBanner(
-        `Final Winner: ${finalWinner || summaries[summaries.length - 1]?.winner || "Unknown"}`,
-        runId
-      );
+      await showBanner(`Final Winner: ${finalWinner || summaries[summaries.length - 1]?.winner || "Unknown"}`, runId);
       if (runId !== runIdRef.current) return;
       setPhase("done");
     } catch (err) {
@@ -308,44 +304,28 @@ function Poker({ agents }) {
   };
 
   const players = result?.players || [];
-  const currentTurn =
-    phase === "revealing" && result?.gameLog?.[displayedLog.length]
-      ? result.gameLog[displayedLog.length].agentName
-      : "";
-  const allCommunityCards = Array.isArray(result?.communityCards)
-    ? result.communityCards.slice(0, 5)
-    : [];
-  const visibleCommunityCards = allCommunityCards.slice(0, Math.min(revealedCommunityCount, 5));
-  const allCardsRevealed =
-    allCommunityCards.length === 0 || visibleCommunityCards.length >= allCommunityCards.length;
+  const currentTurn = phase === "revealing" && result?.gameLog?.[displayedLog.length]
+    ? result.gameLog[displayedLog.length].agentName
+    : "";
+
+  const allCommunityCards = Array.isArray(result?.communityCards) ? result.communityCards.slice(0, 5) : [];
+  const allCardsRevealed = allCommunityCards.length === 0 || visibleCommunityCards.length >= allCommunityCards.length;
   const allActionsRevealed = displayedLog.length >= (result?.gameLog?.length ?? 0);
   const winnerLabel = overallWinner || result?.winner || "";
-  const winnerSet = new Set(
-    String(winnerLabel)
-      .split("&")
-      .map((name) => name.trim())
-      .filter(Boolean)
-  );
-  const canAnnounceWinner =
-    phase === "done" && allCardsRevealed && allActionsRevealed && Boolean(winnerLabel);
+  const winnerSet = new Set(String(winnerLabel).split("&").map((n) => n.trim()).filter(Boolean));
+  const canAnnounceWinner = phase === "done" && allCardsRevealed && allActionsRevealed && Boolean(winnerLabel);
 
   const stagePlayers = useMemo(() => {
     const source = players.length > 0 ? players : agents;
     return source.slice(0, 6).map((player, index) => {
       const live = players[index];
       if (live) return live;
-      return {
-        name: player.name,
-        cards: [],
-        action: "waiting",
-        contribution: 0,
-        folded: false,
-      };
+      return { name: player.name, cards: [], action: "waiting", contribution: 0, folded: false };
     });
   }, [players, agents]);
 
   const lastActor = displayedLog[displayedLog.length - 1]?.agentName;
-  const lastActorIndex = stagePlayers.findIndex((player) => player?.name === lastActor);
+  const lastActorIndex = stagePlayers.findIndex((p) => p?.name === lastActor);
   const flyFromPos = lastActorIndex >= 0 ? TABLE_POSITIONS[lastActorIndex] : null;
 
   const onArenaMove = (event) => {
@@ -354,6 +334,14 @@ function Poker({ agents }) {
     const py = (event.clientY - rect.top) / rect.height - 0.5;
     setParallax({ x: px * 10, y: py * 8 });
   };
+
+  // Group displayed log by stage for action feed
+  const logByStage = displayedLog.reduce((acc, entry) => {
+    const s = entry.stage || "Pre-Flop";
+    if (!acc[s]) acc[s] = [];
+    acc[s].push(entry);
+    return acc;
+  }, {});
 
   return (
     <div className="w-full space-y-4">
@@ -364,12 +352,12 @@ function Poker({ agents }) {
             {phase === "dealing"
               ? `Simulating round ${roundNumber || 1}...`
               : phase === "revealing"
-                ? `Round ${roundNumber} - Turn: ${currentTurn || "..."}`
+                ? <span>Round {roundNumber} — <span className={STAGE_COLORS[currentStage] || "text-cyan-200"}>{currentStage}</span> — Turn: {currentTurn || "..."}</span>
                 : phase === "round-break"
-                  ? roundBanner || "Preparing next round..."
-                : phase === "done"
-                  ? "3-round match completed"
-                  : "Waiting to start"}
+                  ? roundBanner || "Preparing..."
+                  : phase === "done"
+                    ? "3-round match completed"
+                    : "Waiting to start"}
           </p>
         </div>
         <button
@@ -382,15 +370,31 @@ function Poker({ agents }) {
         </button>
       </div>
 
-      {error && (
-        <div className="rounded-xl border border-red-600/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
-          {error}
+      {/* Stage indicator bar */}
+      {(phase === "revealing" || phase === "done") && (
+        <div className="casino-card flex items-center justify-between gap-2 px-4 py-3">
+          {["Pre-Flop", "Flop", "Turn", "River"].map((stage, idx) => {
+            const stagesOrder = ["Pre-Flop", "Flop", "Turn", "River"];
+            const currentIdx = stagesOrder.indexOf(currentStage);
+            const isDone = idx < currentIdx || phase === "done";
+            const isActive = stage === currentStage && phase === "revealing";
+            return (
+              <div key={stage} className="flex flex-1 flex-col items-center gap-1">
+                <div className={`h-1.5 w-full rounded-full transition-all duration-500 ${isDone ? "bg-emerald-400" : isActive ? "bg-cyan-300" : "bg-slate-700"}`} />
+                <p className={`text-[10px] font-semibold uppercase tracking-wider transition-colors ${isActive ? STAGE_COLORS[stage] : isDone ? "text-emerald-400" : "text-slate-500"}`}>
+                  {stage}
+                </p>
+              </div>
+            );
+          })}
         </div>
       )}
+
+      {error && (
+        <div className="rounded-xl border border-red-600/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">{error}</div>
+      )}
       {agents.length === 0 && (
-        <div className="rounded-xl border border-amber-300/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
-          Add agents first to start a game.
-        </div>
+        <div className="rounded-xl border border-amber-300/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">Add agents first to start a game.</div>
       )}
 
       <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
@@ -421,9 +425,7 @@ function Poker({ agents }) {
                 transition={{ duration: 0.4 }}
                 className="winner-banner absolute left-1/2 top-7 -translate-x-1/2 rounded-full border border-amber-200/70 bg-amber-300/15 px-6 py-2 text-center backdrop-blur"
               >
-                <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-amber-100">
-                  Match Winner
-                </p>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-amber-100">Match Winner</p>
                 <p className="text-sm font-black uppercase tracking-wide text-white">{winnerLabel}</p>
               </motion.div>
             </div>
@@ -439,9 +441,7 @@ function Poker({ agents }) {
                 transition={{ duration: 0.3 }}
                 className="round-banner absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full px-5 py-2 text-center"
               >
-                <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-100/90">
-                  Tournament Update
-                </p>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-100/90">Tournament Update</p>
                 <p className="text-sm font-black uppercase tracking-wide text-white">{roundBanner}</p>
               </motion.div>
             )}
@@ -454,6 +454,16 @@ function Poker({ agents }) {
             <div className="poker-table-shell absolute left-1/2 top-[52%] h-[420px] w-[96%] max-w-[860px] -translate-x-1/2 -translate-y-1/2 rounded-[44%] sm:h-[470px]">
               <div className="poker-table-rail absolute inset-0 rounded-[inherit]" />
               <div className="poker-table-felt absolute inset-[18px] rounded-[43%]" />
+
+              {/* Stage label on table */}
+              {currentStage && phase === "revealing" && (
+                <div className="absolute left-1/2 top-[20%] -translate-x-1/2 rounded-full border border-white/10 bg-black/40 px-3 py-1 backdrop-blur">
+                  <p className={`text-[10px] font-bold uppercase tracking-[0.2em] ${STAGE_COLORS[currentStage] || "text-cyan-200"}`}>
+                    {currentStage}
+                  </p>
+                </div>
+              )}
+
               <div className={`table-energy-ring absolute left-1/2 top-1/2 h-[132px] w-[132px] -translate-x-1/2 -translate-y-1/2 rounded-full border-4 ${phase === "revealing" ? "is-active" : ""}`} />
               <div className="pot-core absolute left-1/2 top-1/2 flex h-[125px] w-[125px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full text-center">
                 <div>
@@ -469,13 +479,14 @@ function Poker({ agents }) {
                 </div>
               </div>
 
+              {/* Community cards */}
               <div className="absolute left-1/2 top-[47%] flex -translate-x-1/2 items-center gap-2">
                 {[0, 1, 2, 3, 4].map((idx) => {
                   const card = allCommunityCards[idx];
                   const isRevealed = idx < visibleCommunityCards.length;
                   return (
                     <div key={`board-wrap-${idx}`} className="board-card-wrap">
-                      <PlayingCard key={`board-${idx}`} value={card} hidden={!isRevealed} delay={0.06 * idx} />
+                      <PlayingCard key={`board-${idx}-${isRevealed}`} value={card} hidden={!isRevealed} delay={0.06 * idx} />
                     </div>
                   );
                 })}
@@ -498,7 +509,7 @@ function Poker({ agents }) {
             {stagePlayers.map((player, index) => {
               const pos = TABLE_POSITIONS[index];
               if (!pos) return null;
-              const isWinner = canAnnounceWinner && result?.winner === player.name;
+              const isWinner = canAnnounceWinner && winnerSet.has(player.name);
               const isCurrent = currentTurn === player.name;
               const isReal = Boolean(players[index]);
               return (
@@ -513,7 +524,9 @@ function Poker({ agents }) {
                       ? "seat-winner border-amber-200/75 bg-amber-300/18"
                       : isCurrent
                         ? "seat-current border-cyan-300/70 bg-cyan-300/14 ai-seat-pulse"
-                        : "seat-idle border-white/15 bg-black/35"
+                        : player.folded
+                          ? "border-red-500/30 bg-red-950/30 opacity-60"
+                          : "seat-idle border-white/15 bg-black/35"
                   }`}
                 >
                   <div className="flex items-center justify-center gap-2">
@@ -521,17 +534,15 @@ function Poker({ agents }) {
                       {getInitials(player.name)}
                     </div>
                     <div className="min-w-0">
-                      <p className="truncate text-xs font-bold uppercase tracking-wide text-white">
-                        {player.name}
-                      </p>
-                      <p className="text-[10px] text-amber-100/85">
-                        {isReal ? formatAction(player.action) : "Waiting"}
+                      <p className="truncate text-xs font-bold uppercase tracking-wide text-white">{player.name}</p>
+                      <p className={`text-[10px] ${player.folded ? "text-red-400" : "text-amber-100/85"}`}>
+                        {isReal ? (player.folded ? "Folded" : formatAction(player.action)) : "Waiting"}
                       </p>
                     </div>
                   </div>
                   <div className="mt-2 flex justify-center gap-1">
-                    <PlayingCard value={player.cards?.[0]} mini hidden={!isReal} />
-                    <PlayingCard value={player.cards?.[1]} mini hidden={!isReal} />
+                    <PlayingCard value={player.cards?.[0]} mini hidden={!isReal || player.folded} />
+                    <PlayingCard value={player.cards?.[1]} mini hidden={!isReal || player.folded} />
                   </div>
                   <motion.p
                     key={`${player.name}-${player.contribution}`}
@@ -551,33 +562,16 @@ function Poker({ agents }) {
           <section className="panel-frost casino-card p-4">
             <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">Table Controls</h4>
             <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-              <button
-                data-sfx="fold-click"
-                className="ui-btn ui-btn-fold ui-btn-glass js-sfx-fold rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide"
-              >
-                Fold
-              </button>
-              <button
-                data-sfx="call-click"
-                className="ui-btn ui-btn-call ui-btn-glass js-sfx-call rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide"
-              >
-                Call
-              </button>
-              <button
-                data-sfx="raise-click"
-                className="ui-btn ui-btn-raise ui-btn-glass js-sfx-raise rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide"
-              >
-                Raise
-              </button>
+              <button className="ui-btn ui-btn-fold ui-btn-glass js-sfx-fold rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide">Fold</button>
+              <button className="ui-btn ui-btn-call ui-btn-glass js-sfx-call rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide">Call</button>
+              <button className="ui-btn ui-btn-raise ui-btn-glass js-sfx-raise rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide">Raise</button>
             </div>
           </section>
 
           {canAnnounceWinner && (
             <section className="panel-frost casino-card p-4">
               <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">Result</h4>
-              <p className="winner-text-glow mt-2 text-sm font-semibold text-amber-200">
-                Winner: {winnerLabel}
-              </p>
+              <p className="winner-text-glow mt-2 text-sm font-semibold text-amber-200">Winner: {winnerLabel}</p>
               <p className="mt-1 text-xs text-slate-300">Final Pot: {result.finalPot}</p>
               {result.winningReason && (
                 <p className="mt-2 text-xs leading-relaxed text-slate-300">Reason: {result.winningReason}</p>
@@ -590,13 +584,8 @@ function Poker({ agents }) {
               <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">Round Results</h4>
               <div className="mt-3 space-y-2">
                 {roundSummaries.map((item) => (
-                  <div
-                    key={`round-summary-${item.round}`}
-                    className="rounded-xl border border-white/10 bg-black/25 px-3 py-2"
-                  >
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-cyan-100">
-                      Round {item.round}
-                    </p>
+                  <div key={`round-summary-${item.round}`} className="rounded-xl border border-white/10 bg-black/25 px-3 py-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-cyan-100">Round {item.round}</p>
                     <p className="text-xs text-slate-200">Winner: {item.winner}</p>
                     <p className="text-[11px] text-slate-400">Pot: {item.finalPot}</p>
                   </div>
@@ -605,24 +594,30 @@ function Poker({ agents }) {
             </section>
           )}
 
+          {/* Action Feed grouped by stage */}
           <section className="panel-frost casino-card p-4">
             <h4 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">Action Feed</h4>
-            <div className="mt-3 max-h-[250px] space-y-2 overflow-auto pr-1">
+            <div className="mt-3 max-h-[320px] space-y-3 overflow-auto pr-1">
               <AnimatePresence>
-                {displayedLog.map((item, index) => (
-                  <motion.div
-                    key={`${item.agentName}-${index}`}
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.24 }}
-                    className={`action-line rounded-xl border border-white/10 bg-black/30 px-3 py-2 ${index === displayedLog.length - 1 ? "is-new" : ""}`}
-                  >
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-100">
-                      {item.agentName}
+                {Object.entries(logByStage).map(([stage, entries]) => (
+                  <div key={stage}>
+                    <p className={`mb-1 text-[10px] font-bold uppercase tracking-[0.2em] ${STAGE_COLORS[stage] || "text-cyan-200"}`}>
+                      — {stage} —
                     </p>
-                    <p className="text-xs text-slate-300">{item.actionText}</p>
-                  </motion.div>
+                    {entries.map((item, index) => (
+                      <motion.div
+                        key={`${item.agentName}-${stage}-${index}`}
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.24 }}
+                        className="action-line mb-1 rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                      >
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-100">{item.agentName}</p>
+                        <p className="text-xs text-slate-300">{item.actionText}</p>
+                      </motion.div>
+                    ))}
+                  </div>
                 ))}
               </AnimatePresence>
             </div>

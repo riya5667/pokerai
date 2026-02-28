@@ -27,9 +27,12 @@ const RANK_VALUE = Object.fromEntries(RANKS.map((rank, index) => [rank, index + 
 const VALUE_TO_RANK = Object.fromEntries(RANKS.map((rank, index) => [index + 2, rank]));
 const SUIT_SYMBOL = { S: "\u2660", H: "\u2665", D: "\u2666", C: "\u2663" };
 
-const STARTING_STACK = 100;
+const STARTING_STACK = 200;
 const MIN_BET = 10;
 const RAISE_INCREMENT = 10;
+
+// Poker stages
+const STAGES = ["Pre-Flop", "Flop", "Turn", "River"];
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -57,14 +60,12 @@ function shuffleDeck(deck) {
 function dealCards(deck, players, cardsPerPlayer = 2) {
   const dealtPlayers = players.map((player) => ({ ...player, cards: [] }));
   let cursor = 0;
-
   for (let i = 0; i < cardsPerPlayer; i += 1) {
     for (const player of dealtPlayers) {
       player.cards.push(deck[cursor]);
       cursor += 1;
     }
   }
-
   return { players: dealtPlayers, remainingDeck: deck.slice(cursor) };
 }
 
@@ -88,23 +89,14 @@ function getAllowedActions(currentBet, player) {
   const toCall = Math.max(0, currentBet - player.contribution);
   const canCall = toCall > 0 && player.stack >= toCall;
   const canRaise = player.stack >= toCall + RAISE_INCREMENT;
-  const canFold = true;
-
-  return {
-    canFold,
-    canCall,
-    canRaise,
-    toCall,
-  };
+  return { canFold: true, canCall, canRaise, toCall };
 }
 
 function sanitizeAction(action, currentBet, player) {
   const { canCall, canRaise, toCall } = getAllowedActions(currentBet, player);
-
   if (action === "fold") return "fold";
   if (action === "raise" && canRaise) return "raise";
   if (action === "call" && canCall) return "call";
-
   if (canCall) return "call";
   if (canRaise && toCall === 0) return "raise";
   return "fold";
@@ -129,7 +121,6 @@ function applyBettingAction(player, action, tableState) {
     player.stack -= pay;
     player.contribution += pay;
     next.pot += pay;
-
     return {
       action,
       actionText: `Called ${next.currentBet}`,
@@ -138,6 +129,7 @@ function applyBettingAction(player, action, tableState) {
     };
   }
 
+  // raise
   const newBet = Math.max(next.currentBet + RAISE_INCREMENT, MIN_BET);
   const raiseToPay = Math.max(0, newBet - player.contribution);
   const pay = Math.min(player.stack, raiseToPay);
@@ -148,17 +140,14 @@ function applyBettingAction(player, action, tableState) {
 
   return {
     action: "raise",
-    actionText: `Raised the bet to ${next.currentBet}`,
+    actionText: `Raised to ${next.currentBet}`,
     betAfterAction: next.currentBet,
     potAfterAction: next.pot,
   };
 }
 
 function evaluateHand(cards) {
-  const values = cards
-    .map((card) => RANK_VALUE[card.rank] || 0)
-    .sort((a, b) => b - a);
-
+  const values = cards.map((card) => RANK_VALUE[card.rank] || 0).sort((a, b) => b - a);
   const isPair = values[0] === values[1];
   return {
     handRank: isPair ? "Pair" : "High Card",
@@ -170,13 +159,11 @@ function evaluateHand(cards) {
 function compareHands(aHand, bHand) {
   if (aHand.handRank === "Pair" && bHand.handRank !== "Pair") return 1;
   if (aHand.handRank !== "Pair" && bHand.handRank === "Pair") return -1;
-
   if (aHand.handRank === "Pair" && bHand.handRank === "Pair") {
     if (aHand.pairValue > bHand.pairValue) return 1;
     if (aHand.pairValue < bHand.pairValue) return -1;
     return 0;
   }
-
   if (aHand.highCards[0] > bHand.highCards[0]) return 1;
   if (aHand.highCards[0] < bHand.highCards[0]) return -1;
   if (aHand.highCards[1] > bHand.highCards[1]) return 1;
@@ -185,116 +172,75 @@ function compareHands(aHand, bHand) {
 }
 
 function describeWinningReason(winners, runnerUp, singleByFold = false) {
-  if (singleByFold) {
-    return "All other players folded.";
-  }
-
-  if (winners.length > 1) {
-    return "Tie on hand strength. Pot is split.";
-  }
-
+  if (singleByFold) return "All other players folded.";
+  if (winners.length > 1) return "Tie on hand strength. Pot is split.";
   const winner = winners[0];
-  if (!runnerUp) {
-    return "Best hand at showdown.";
-  }
-
+  if (!runnerUp) return "Best hand at showdown.";
   if (winner.hand.handRank === "Pair" && runnerUp.hand.handRank === "Pair") {
     return `Pair of ${VALUE_TO_RANK[winner.hand.pairValue]}s beats pair of ${VALUE_TO_RANK[runnerUp.hand.pairValue]}s`;
   }
-
   if (winner.hand.handRank === "Pair" && runnerUp.hand.handRank === "High Card") {
     return `Pair of ${VALUE_TO_RANK[winner.hand.pairValue]}s beats ${VALUE_TO_RANK[runnerUp.hand.highCards[0]]} high`;
   }
-
   return `${VALUE_TO_RANK[winner.hand.highCards[0]]} high beats ${VALUE_TO_RANK[runnerUp.hand.highCards[0]]} high`;
 }
 
 function determineWinner(players, pot) {
-  const activePlayers = players.filter((player) => !player.folded);
-
+  const activePlayers = players.filter((p) => !p.folded);
   if (activePlayers.length === 1) {
     const only = activePlayers[0];
-    return {
-      winners: [only],
-      winningReason: describeWinningReason([only], null, true),
-      winningAmountEach: pot,
-      isSplit: false,
-    };
+    return { winners: [only], winningReason: describeWinningReason([only], null, true), winningAmountEach: pot, isSplit: false };
   }
-
   if (activePlayers.length === 0) {
     const fallback = players[0];
-    return {
-      winners: [fallback],
-      winningReason: "All players folded. First player receives pot.",
-      winningAmountEach: pot,
-      isSplit: false,
-    };
+    return { winners: [fallback], winningReason: "All players folded.", winningAmountEach: pot, isSplit: false };
   }
-
   for (const player of activePlayers) {
     player.hand = evaluateHand(player.cards);
   }
-
   let best = activePlayers[0];
   for (const player of activePlayers.slice(1)) {
-    if (compareHands(player.hand, best.hand) > 0) {
-      best = player;
-    }
+    if (compareHands(player.hand, best.hand) > 0) best = player;
   }
-
-  const winners = activePlayers.filter(
-    (player) => compareHands(player.hand, best.hand) === 0
-  );
-
-  const runnerUp = activePlayers
-    .filter((player) => compareHands(player.hand, best.hand) < 0)
-    .sort((a, b) => compareHands(b.hand, a.hand))[0];
-
+  const winners = activePlayers.filter((p) => compareHands(p.hand, best.hand) === 0);
+  const runnerUp = activePlayers.filter((p) => compareHands(p.hand, best.hand) < 0).sort((a, b) => compareHands(b.hand, a.hand))[0];
   const isSplit = winners.length > 1;
   const winningAmountEach = isSplit ? Math.floor(pot / winners.length) : pot;
-
-  return {
-    winners,
-    winningReason: describeWinningReason(winners, runnerUp, false),
-    winningAmountEach,
-    isSplit,
-  };
+  return { winners, winningReason: describeWinningReason(winners, runnerUp, false), winningAmountEach, isSplit };
 }
 
 function getOtherActionsSummary(gameLog) {
-  if (gameLog.length === 0) {
-    return "None";
-  }
-  return gameLog.map((entry) => `${entry.agentName} ${entry.action}`).join(", ");
+  if (gameLog.length === 0) return "None yet";
+  return gameLog.slice(-3).map((e) => `${e.agentName} ${e.action}`).join(", ");
 }
 
-async function getAgentAction(player, tableState, gameLog) {
+async function getAgentAction(player, tableState, gameLog, stage, communityCards) {
   const activePlayers = tableState.players.filter((p) => !p.folded).length;
-  const userPrompt = `Your Cards: ${cardToPrettyString(player.cards[0])}, ${cardToPrettyString(player.cards[1])}
+  const communityStr = communityCards.length > 0
+    ? communityCards.map(cardToPrettyString).join(", ")
+    : "None yet";
+
+  const userPrompt = `Stage: ${stage}
+Your Cards: ${cardToPrettyString(player.cards[0])}, ${cardToPrettyString(player.cards[1])}
+Community Cards: ${communityStr}
 Current Bet: ${tableState.currentBet}
 Pot: ${tableState.pot}
 Active Players: ${activePlayers}
 Your Stack: ${player.stack}
+Recent Actions: ${getOtherActionsSummary(gameLog)}
 Available Actions: fold, call, raise
-Other Players Actions: ${getOtherActionsSummary(gameLog)}
 
-Rules:
-- Respond with ONLY one word: fold, call, or raise.
-- No explanation.`;
+Respond with ONLY one word: fold, call, or raise. No explanation.`;
 
   const completion = await openai.chat.completions.create({
     model: "llama-3.1-8b-instant",
-    temperature: 0.3,
+    temperature: 0.4,
     messages: [
       {
         role: "system",
-        content: `You are ${player.name}. Personality: ${player.personality}. You are playing poker strategically.`,
+        content: `You are ${player.name}. Personality: ${player.personality}. You are playing Texas Hold'em poker strategically.`,
       },
-      {
-        role: "user",
-        content: userPrompt,
-      },
+      { role: "user", content: userPrompt },
     ],
   });
 
@@ -302,14 +248,53 @@ Rules:
   return normalizeAction(raw);
 }
 
+// Run a single betting round for a given stage
+async function runBettingStage(players, tableState, gameLog, stage, communityCards) {
+  const stageLogs = [];
+  // Reset currentBet for new stage (except pre-flop keeps MIN_BET)
+  if (stage !== "Pre-Flop") {
+    tableState.currentBet = 0;
+    // Reset contributions for this stage tracking
+    for (const player of players) {
+      player.stageContribution = 0;
+    }
+  }
+
+  for (const player of players) {
+    const activePlayers = players.filter((p) => !p.folded);
+    if (activePlayers.length <= 1) break;
+    if (player.folded) continue;
+
+    const llmAction = await getAgentAction(player, tableState, gameLog, stage, communityCards);
+    const action = sanitizeAction(llmAction, tableState.currentBet, player);
+    player.action = action;
+
+    const applied = applyBettingAction(player, action, tableState);
+    tableState.currentBet = applied.betAfterAction;
+    tableState.pot = applied.potAfterAction;
+
+    const logEntry = {
+      agentName: player.name,
+      action: applied.action,
+      actionText: applied.actionText,
+      stage,
+      currentBet: applied.betAfterAction,
+      potAfterAction: applied.potAfterAction,
+    };
+
+    gameLog.push(logEntry);
+    stageLogs.push(logEntry);
+  }
+
+  return stageLogs;
+}
+
 app.post("/play-poker", async (req, res) => {
   try {
     const { agents } = req.body ?? {};
 
     if (!Array.isArray(agents) || agents.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "At least one agent is required to play poker." });
+      return res.status(400).json({ error: "At least one agent is required." });
     }
 
     if (!process.env.GROQ_API_KEY) {
@@ -323,6 +308,7 @@ app.post("/play-poker", async (req, res) => {
       cards: [],
       stack: STARTING_STACK,
       contribution: 0,
+      stageContribution: 0,
       action: null,
       folded: false,
       hand: null,
@@ -330,63 +316,66 @@ app.post("/play-poker", async (req, res) => {
 
     const deck = shuffleDeck(createDeck());
     const { players, remainingDeck } = dealCards(deck, basePlayers, 2);
-    const communityCards = remainingDeck.slice(0, 5);
 
-    const tableState = {
-      currentBet: MIN_BET,
-      pot: 0,
-      players,
-    };
+    // Community cards: 3 (flop) + 1 (turn) + 1 (river)
+    const flopCards = remainingDeck.slice(0, 3);
+    const turnCard = remainingDeck[3];
+    const riverCard = remainingDeck[4];
+
+    const tableState = { currentBet: MIN_BET, pot: 0, players };
     const gameLog = [];
 
-    for (const player of tableState.players) {
-      if (tableState.players.filter((p) => !p.folded).length <= 1) {
-        break;
-      }
+    // ---- Stage 1: Pre-Flop ----
+    const preFlopLogs = await runBettingStage(players, tableState, gameLog, "Pre-Flop", []);
 
-      const llmAction = await getAgentAction(player, tableState, gameLog);
-      const action = sanitizeAction(llmAction, tableState.currentBet, player);
-      player.action = action;
+    // ---- Stage 2: Flop (3 community cards) ----
+    const flopLogs = await runBettingStage(players, tableState, gameLog, "Flop", flopCards);
 
-      const applied = applyBettingAction(player, action, tableState);
-      tableState.currentBet = applied.betAfterAction;
-      tableState.pot = applied.potAfterAction;
+    // ---- Stage 3: Turn (4th community card) ----
+    const turnLogs = await runBettingStage(players, tableState, gameLog, "Turn", [...flopCards, turnCard]);
 
-      gameLog.push({
-        agentName: player.name,
-        action: applied.action,
-        actionText: applied.actionText,
-        currentBet: applied.betAfterAction,
-        potAfterAction: applied.potAfterAction,
-      });
-    }
+    // ---- Stage 4: River (5th community card) ----
+    const riverLogs = await runBettingStage(players, tableState, gameLog, "River", [...flopCards, turnCard, riverCard]);
 
-    const contributionSum = tableState.players.reduce(
-      (sum, player) => sum + player.contribution,
-      0
-    );
+    // Final pot
+    const contributionSum = players.reduce((sum, p) => sum + p.contribution, 0);
     tableState.pot = contributionSum;
 
-    const winnerResult = determineWinner(tableState.players, tableState.pot);
+    const allCommunityCards = [...flopCards, turnCard, riverCard];
+    const winnerResult = determineWinner(players, tableState.pot);
     const winnerNames = winnerResult.winners.map((w) => w.name);
 
     return res.json({
       pot: tableState.pot,
       finalPot: tableState.pot,
       currentBet: tableState.currentBet,
-      communityCards: communityCards.map(cardToString),
+      communityCards: allCommunityCards.map(cardToString),
+      // Stage-by-stage community card reveal info
+      stageCards: {
+        preFlop: [],
+        flop: flopCards.map(cardToString),
+        turn: [...flopCards, turnCard].map(cardToString),
+        river: allCommunityCards.map(cardToString),
+      },
       winner: winnerNames.length === 1 ? winnerNames[0] : winnerNames.join(" & "),
       winningReason: winnerResult.winningReason,
       winningAmount: winnerResult.winningAmountEach,
       splitPot: winnerResult.isSplit,
-      players: tableState.players.map((player) => ({
-        name: player.name,
-        cards: player.cards.map(cardToString),
-        action: player.action || "fold",
-        contribution: player.contribution,
-        handRank: player.hand?.handRank || "High Card",
+      players: players.map((p) => ({
+        name: p.name,
+        cards: p.cards.map(cardToString),
+        action: p.action || "fold",
+        contribution: p.contribution,
+        handRank: p.hand?.handRank || "High Card",
+        folded: p.folded,
       })),
       gameLog,
+      stageSummary: [
+        { stage: "Pre-Flop", logs: preFlopLogs, communityCards: [] },
+        { stage: "Flop", logs: flopLogs, communityCards: flopCards.map(cardToString) },
+        { stage: "Turn", logs: turnLogs, communityCards: [...flopCards, turnCard].map(cardToString) },
+        { stage: "River", logs: riverLogs, communityCards: allCommunityCards.map(cardToString) },
+      ],
     });
   } catch (error) {
     const status = error?.status || 500;
