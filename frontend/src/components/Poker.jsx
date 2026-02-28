@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
-const API_BASE_URL = "http://localhost:5000";
+const API_BASE_URL = "https://pokerai-gou9.onrender.com";
 
 const SUIT_SYMBOL = { S: "\u2660", H: "\u2665", D: "\u2666", C: "\u2663" };
 
